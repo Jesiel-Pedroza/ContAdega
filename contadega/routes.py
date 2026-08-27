@@ -1,15 +1,17 @@
 import base64, csv, io
+from datetime import timedelta
+from uuid import UUID
 from functools import wraps
 import qrcode
-from flask import Blueprint, abort, flash, redirect, render_template, request, send_file, session, url_for
+from flask import Blueprint, abort, current_app, flash, jsonify, redirect, render_template, request, send_file, send_from_directory, session, url_for
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from .extensions import db
-from .models import Cellar, ExpectedStock, Inventory, InventoryScope, Position, Role, Sector, StockHistory, User, Wine, now
+from .models import Cellar, ExpectedStock, Inventory, InventoryScope, OfflineOperation, OfflinePackage, Position, Role, Sector, StockHistory, User, Wine, now
 from .services import (CSV_FIELDS, ROLES, acquire_position, adjust_stock, approve_inventory,
  classify_inventory, create_cellar, create_first_admin, create_inventory, create_position,
  create_sector, create_user, create_wine, finish_position, import_wines, parse_csv,
- save_count, start_inventory, transition_inventory)
+ save_count, start_inventory, transition_inventory, apply_offline_operation, OFFLINE_STAGE_STATUS)
 
 bp=Blueprint("main",__name__)
 attempts={}
@@ -33,6 +35,13 @@ def role_required(role):
 def helpers(): return {"current_user":current_user(),"roles":ROLES}
 @bp.route("/")
 def index(): return redirect(url_for("main.setup" if not User.query.first() else "main.dashboard"))
+@bp.get("/offline")
+def offline():
+    response=render_template("offline.html"); return response,200,{"Cache-Control":"public, max-age=86400"}
+@bp.get("/service-worker.js")
+def service_worker():
+    response=send_from_directory(current_app.static_folder,"service-worker.js",mimetype="application/javascript",max_age=0)
+    response.headers["Service-Worker-Allowed"]="/"; response.headers["Cache-Control"]="no-cache"; return response
 @bp.route("/primeiro-acesso",methods=["GET","POST"])
 def setup():
     if User.query.first(): abort(404)
@@ -56,7 +65,54 @@ def login():
     return render_template("login.html")
 @bp.post("/logout")
 @login_required
-def logout(): session.clear(); flash("Sessão encerrada.","sucesso"); return redirect(url_for("main.login"))
+def logout():
+    user_id=session.get("user_id"); session.clear(); flash("Sessão encerrada.","sucesso")
+    response=redirect(url_for("main.login")); response.set_cookie("contadega_logout",str(user_id),max_age=60,samesite="Lax")
+    return response
+
+def can_count(user, stage):
+    role={"primeira":"contador","segunda":"conferente","recontagem":"conferente"}.get(stage)
+    return bool(role and (user.has_role(role) or user.has_role("administrador")))
+
+@bp.get("/api/offline/inventarios/<int:inventory_id>/pacote")
+@login_required
+def offline_package(inventory_id):
+    inv=db.get_or_404(Inventory,inventory_id); stage=request.args.get("stage","primeira"); user=current_user()
+    if not can_count(user,stage) or inv.status!=OFFLINE_STAGE_STATUS.get(stage): abort(403)
+    expires=now()+timedelta(hours=8)
+    package=OfflinePackage.query.filter_by(user_id=user.id,inventory_id=inv.id,stage=stage).first()
+    if not package: package=OfflinePackage(user_id=user.id,inventory_id=inv.id,stage=stage,expires_at=expires); db.session.add(package)
+    else: package.issued_at=now(); package.expires_at=expires; package.revoked_at=None
+    db.session.commit()
+    scopes=[{"id":s.id,"version":s.version,"position":{"id":s.position.id,"code":s.position.code,"qr_code":s.position.qr_code},"finished":bool(getattr(s,{"primeira":"first_finished_at","segunda":"second_finished_at","recontagem":"recount_finished_at"}[stage]))} for s in inv.scopes]
+    wines=[{"id":w.id,"name":w.name,"producer":w.producer,"vintage":w.vintage,"barcode":w.barcode} for w in Wine.query.filter_by(active=True).order_by(Wine.name)]
+    response=jsonify(package_id=package.id,user_id=user.id,inventory={"id":inv.id,"name":inv.name,"status":inv.status},stage=stage,issued_at=package.issued_at.isoformat()+"Z",expires_at=package.expires_at.isoformat()+"Z",server_time=now().isoformat()+"Z",scopes=scopes,wines=wines)
+    response.headers["Cache-Control"]="no-store, private"; return response
+
+@bp.post("/api/offline/sincronizar")
+@login_required
+def offline_sync():
+    if request.content_length and request.content_length>262144: return jsonify(error="payload_too_large",server_time=now().isoformat()+"Z"),413
+    body=request.get_json(silent=True)
+    if not isinstance(body,dict) or not isinstance(body.get("operations"),list) or len(body["operations"])>100: return jsonify(error="invalid_payload",server_time=now().isoformat()+"Z"),400
+    package=db.session.get(OfflinePackage,body.get("package_id")); user=current_user()
+    if not package or package.user_id!=user.id: abort(403)
+    results=[]
+    for data in body["operations"]:
+        try:
+            required={"id":str,"scope_id":int,"wine_id":int,"sequence":int,"base_version":int,"quantity":int,"device_id":str}
+            if not isinstance(data,dict) or any(not isinstance(data.get(k),t) for k,t in required.items()) or data["quantity"]<0 or data["sequence"]<1 or len(data["device_id"])>64: raise ValueError
+            UUID(data["id"])
+        except (ValueError,TypeError): db.session.rollback(); return jsonify(error="invalid_payload",server_time=now().isoformat()+"Z"),400
+        existing=db.session.get(OfflineOperation,data["id"])
+        if existing:
+            results.append({"id":existing.id,"status":existing.status,"error":existing.error_code,"idempotent":True}); continue
+        try:
+            op=apply_offline_operation(package,data,user); db.session.flush(); results.append({"id":op.id,"status":op.status,"error":op.error_code,"idempotent":False})
+        except IntegrityError:
+            db.session.rollback(); return jsonify(error="sequence_conflict",server_time=now().isoformat()+"Z"),409
+    db.session.commit()
+    response=jsonify(results=results,server_time=now().isoformat()+"Z"); response.headers["Cache-Control"]="no-store, private"; return response
 @bp.get("/painel")
 @login_required
 def dashboard(): return render_template("dashboard.html",counts={"Vinhos":Wine.query.count(),"Adegas":Cellar.query.count(),"Posições":Position.query.count()})

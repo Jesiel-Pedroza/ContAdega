@@ -1,0 +1,12 @@
+"""Pacotes, operações idempotentes e auditoria offline."""
+from alembic import op
+import sqlalchemy as sa
+revision="0003"; down_revision="0002"
+
+def upgrade():
+    op.create_table("offline_packages",sa.Column("id",sa.String(36),primary_key=True),sa.Column("user_id",sa.Integer(),sa.ForeignKey("users.id",ondelete="CASCADE"),nullable=False),sa.Column("inventory_id",sa.Integer(),sa.ForeignKey("inventories.id",ondelete="CASCADE"),nullable=False),sa.Column("stage",sa.String(20),nullable=False),sa.Column("issued_at",sa.DateTime(),nullable=False),sa.Column("expires_at",sa.DateTime(),nullable=False),sa.Column("revoked_at",sa.DateTime()),sa.UniqueConstraint("user_id","inventory_id","stage",name="uq_offline_package_user_inventory_stage"))
+    op.create_table("offline_operations",sa.Column("id",sa.String(36),primary_key=True),sa.Column("package_id",sa.String(36),sa.ForeignKey("offline_packages.id",ondelete="CASCADE"),nullable=False),sa.Column("user_id",sa.Integer(),sa.ForeignKey("users.id"),nullable=False),sa.Column("inventory_id",sa.Integer(),sa.ForeignKey("inventories.id"),nullable=False),sa.Column("scope_id",sa.Integer(),sa.ForeignKey("inventory_scopes.id"),nullable=False),sa.Column("wine_id",sa.Integer(),sa.ForeignKey("wines.id"),nullable=False),sa.Column("sequence",sa.Integer(),nullable=False),sa.Column("base_version",sa.Integer(),nullable=False),sa.Column("quantity",sa.Integer(),nullable=False),sa.Column("device_id",sa.String(64),nullable=False),sa.Column("status",sa.String(30),nullable=False),sa.Column("error_code",sa.String(40)),sa.Column("received_at",sa.DateTime(),nullable=False),sa.Column("applied_at",sa.DateTime()),sa.UniqueConstraint("package_id","device_id","sequence",name="uq_offline_device_sequence"),sa.CheckConstraint("quantity >= 0",name="ck_offline_quantity_nonnegative"))
+    op.create_table("offline_audits",sa.Column("id",sa.Integer(),primary_key=True),sa.Column("operation_id",sa.String(36),nullable=False),sa.Column("user_id",sa.Integer(),sa.ForeignKey("users.id"),nullable=False),sa.Column("inventory_id",sa.Integer(),sa.ForeignKey("inventories.id"),nullable=False),sa.Column("scope_id",sa.Integer(),sa.ForeignKey("inventory_scopes.id"),nullable=False),sa.Column("event",sa.String(40),nullable=False),sa.Column("detail",sa.Text()),sa.Column("created_at",sa.DateTime(),nullable=False))
+
+def downgrade():
+    for name in ("offline_audits","offline_operations","offline_packages"): op.drop_table(name)

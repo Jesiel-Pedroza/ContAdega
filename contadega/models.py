@@ -68,3 +68,18 @@ class InventoryCount(db.Model):
     __tablename__="inventory_counts"; __table_args__=(UniqueConstraint("inventory_id","position_id","wine_id","stage",name="uq_count_stage"),CheckConstraint("quantity >= 0",name="ck_count_nonnegative"))
     id=db.Column(db.Integer,primary_key=True); inventory_id=db.Column(db.Integer,db.ForeignKey("inventories.id",ondelete="CASCADE"),nullable=False); position_id=db.Column(db.Integer,db.ForeignKey("positions.id"),nullable=False); wine_id=db.Column(db.Integer,db.ForeignKey("wines.id"),nullable=False); stage=db.Column(db.String(20),nullable=False); quantity=db.Column(db.Integer,nullable=False); user_id=db.Column(db.Integer,db.ForeignKey("users.id"),nullable=False); device=db.Column(db.String(120)); counted_at=db.Column(db.DateTime,nullable=False,default=now); observation=db.Column(db.Text); version=db.Column(db.Integer,nullable=False,default=1)
     wine=db.relationship(Wine); position=db.relationship(Position); user=db.relationship(User)
+
+class OfflinePackage(db.Model):
+    __tablename__="offline_packages"
+    id=db.Column(db.String(36),primary_key=True,default=lambda:str(uuid4())); user_id=db.Column(db.Integer,db.ForeignKey("users.id",ondelete="CASCADE"),nullable=False); inventory_id=db.Column(db.Integer,db.ForeignKey("inventories.id",ondelete="CASCADE"),nullable=False); stage=db.Column(db.String(20),nullable=False); issued_at=db.Column(db.DateTime,nullable=False,default=now); expires_at=db.Column(db.DateTime,nullable=False); revoked_at=db.Column(db.DateTime)
+    __table_args__=(UniqueConstraint("user_id","inventory_id","stage",name="uq_offline_package_user_inventory_stage"),)
+    inventory=db.relationship(Inventory)
+
+class OfflineOperation(db.Model):
+    __tablename__="offline_operations"
+    id=db.Column(db.String(36),primary_key=True); package_id=db.Column(db.String(36),db.ForeignKey("offline_packages.id",ondelete="CASCADE"),nullable=False); user_id=db.Column(db.Integer,db.ForeignKey("users.id"),nullable=False); inventory_id=db.Column(db.Integer,db.ForeignKey("inventories.id"),nullable=False); scope_id=db.Column(db.Integer,db.ForeignKey("inventory_scopes.id"),nullable=False); wine_id=db.Column(db.Integer,db.ForeignKey("wines.id"),nullable=False); sequence=db.Column(db.Integer,nullable=False); base_version=db.Column(db.Integer,nullable=False); quantity=db.Column(db.Integer,nullable=False); device_id=db.Column(db.String(64),nullable=False); status=db.Column(db.String(30),nullable=False); error_code=db.Column(db.String(40)); received_at=db.Column(db.DateTime,nullable=False,default=now); applied_at=db.Column(db.DateTime)
+    __table_args__=(UniqueConstraint("package_id","device_id","sequence",name="uq_offline_device_sequence"),CheckConstraint("quantity >= 0",name="ck_offline_quantity_nonnegative"))
+
+class OfflineAudit(db.Model):
+    __tablename__="offline_audits"
+    id=db.Column(db.Integer,primary_key=True); operation_id=db.Column(db.String(36),nullable=False); user_id=db.Column(db.Integer,db.ForeignKey("users.id"),nullable=False); inventory_id=db.Column(db.Integer,db.ForeignKey("inventories.id"),nullable=False); scope_id=db.Column(db.Integer,db.ForeignKey("inventory_scopes.id"),nullable=False); event=db.Column(db.String(40),nullable=False); detail=db.Column(db.Text); created_at=db.Column(db.DateTime,nullable=False,default=now)
