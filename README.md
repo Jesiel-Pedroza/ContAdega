@@ -1,6 +1,6 @@
 # ContAdega
 
-Aplicação web independente, mobile-first, para cadastros, estoque esperado e inventário físico cego de vinhos em adegas. Inclui autenticação por perfis, QR Codes, CSV, duas contagens, recontagem auditável e aprovação transacional. PWA/offline e reconhecimento de imagem continuam fora do escopo.
+Aplicação web independente, mobile-first, para cadastros, estoque esperado e inventário físico cego de vinhos em adegas. Inclui autenticação por perfis, PWA/offline, etiquetas com QR, relatórios e CSV, duas contagens, auditoria, backup SQLite consistente e aprovação transacional.
 
 ## Requisitos
 
@@ -68,7 +68,20 @@ A primeira contagem e a conferência são cegas. Cada posição é bloqueada por
 
 As conexões ativam `foreign_keys`, WAL e `busy_timeout=5000`. WAL melhora leituras simultâneas, mas SQLite continua permitindo apenas um escritor por vez; para muitos dispositivos escrevendo ao mesmo tempo, migre futuramente para um SGBD servidor.
 
-Para backup consistente, pare a aplicação e copie o arquivo `instance/contadega.sqlite` (e, caso existam, seus arquivos `-wal` e `-shm`) para mídia protegida. Alternativamente, com a aplicação parada: `sqlite3 instance/contadega.sqlite ".backup backup-contadega.sqlite"`. Teste periodicamente a restauração e proteja o backup, pois contém dados de usuários.
+Administradores podem criar um backup consistente e verificado em **Manutenção**. A rotina usa a API de backup do SQLite, não uma cópia simples do arquivo ativo. `BACKUP_DIRECTORY` define o diretório (padrão `instance/backups`) e `BACKUP_RETENTION` a quantidade retida (padrão 14). A interface não baixa nem restaura backups. Veja o procedimento deliberado de restauração em [MANUAL_OPERACIONAL.md](MANUAL_OPERACIONAL.md).
+
+## Relatórios, manutenção e demonstração
+
+**Relatórios** oferece dez visões operacionais, filtros, CSV UTF-8 com BOM e separador `;`, além de impressão HTML. **Etiquetas** gera folhas A4 em três tamanhos; o QR contém apenas o UUID público da posição. **Manutenção** mostra integridade e tamanhos do SQLite e dos backups. A trilha de auditoria é somente leitura na interface.
+
+Dados fictícios nunca são carregados automaticamente. Em um banco vazio, execute separadamente:
+
+```bash
+flask --app wsgi:app db upgrade
+flask --app wsgi:app demo-data
+```
+
+O fluxo diário completo, PWA, backup, restauração e solução de problemas estão no [manual operacional](MANUAL_OPERACIONAL.md).
 
 ## Segurança operacional
 

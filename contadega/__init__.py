@@ -1,6 +1,6 @@
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from flask import Flask, redirect, url_for
+from flask import Flask
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from .config import Config
@@ -29,6 +29,16 @@ def create_app(config=None):
     from . import models
     from .routes import bp
     app.register_blueprint(bp)
+    from .commands import register_commands
+    register_commands(app)
+
+    @app.after_request
+    def security_headers(response):
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; media-src 'self' blob:")
+        return response
 
     @app.template_filter("br_datetime")
     def br_datetime(value):

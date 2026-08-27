@@ -83,3 +83,15 @@ class OfflineOperation(db.Model):
 class OfflineAudit(db.Model):
     __tablename__="offline_audits"
     id=db.Column(db.Integer,primary_key=True); operation_id=db.Column(db.String(36),nullable=False); user_id=db.Column(db.Integer,db.ForeignKey("users.id"),nullable=False); inventory_id=db.Column(db.Integer,db.ForeignKey("inventories.id"),nullable=False); scope_id=db.Column(db.Integer,db.ForeignKey("inventory_scopes.id"),nullable=False); event=db.Column(db.String(40),nullable=False); detail=db.Column(db.Text); created_at=db.Column(db.DateTime,nullable=False,default=now)
+
+class AuditLog(db.Model):
+    """Append-only operational audit trail; never stores credentials or session data."""
+    __tablename__="audit_logs"
+    id=db.Column(db.Integer,primary_key=True)
+    user_id=db.Column(db.Integer,db.ForeignKey("users.id",ondelete="SET NULL"))
+    action=db.Column(db.String(60),nullable=False,index=True)
+    entity_type=db.Column(db.String(60))
+    entity_id=db.Column(db.String(64))
+    detail=db.Column(db.Text)
+    created_at=db.Column(db.DateTime,nullable=False,default=now,index=True)
+    user=db.relationship(User)
