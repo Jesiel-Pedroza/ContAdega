@@ -1,9 +1,32 @@
 import csv, io
 from sqlalchemy import func
 from .extensions import db
-from .models import (Cellar, ExpectedStock, Inventory, InventoryCount,
+from .models import (Cellar, ExpectedStock, Inventory, InventoryCount, OfflineAudit, OfflineOperation,
  InventoryScope, InventorySnapshot, Position, Role, Sector, StockHistory,
  User, Wine, now)
+
+OFFLINE_STAGE_STATUS={"primeira":"em_contagem","segunda":"em_conferencia","recontagem":"com_divergencias"}
+
+def apply_offline_operation(package, data, user):
+    """Aplica uma mutação sem commit; conflitos viram registros auditáveis, nunca sobrescritas."""
+    scope=db.session.get(InventoryScope,data["scope_id"]); wine=db.session.get(Wine,data["wine_id"]); inv=package.inventory
+    code=None
+    if package.revoked_at or package.expires_at<now(): code="package_expired"
+    elif package.user_id!=user.id: code="unauthorized"
+    elif inv.status in {"cancelado","aprovado"}: code=f"inventory_{inv.status}"
+    elif inv.status!=OFFLINE_STAGE_STATUS.get(package.stage): code="inventory_stage_changed"
+    elif not scope or scope.inventory_id!=inv.id or not wine: code="invalid_reference"
+    elif getattr(scope,{"primeira":"first_finished_at","segunda":"second_finished_at","recontagem":"recount_finished_at"}[package.stage]): code="position_finished"
+    elif scope.version!=data["base_version"]: code="version_conflict"
+    operation=OfflineOperation(id=data["id"],package_id=package.id,user_id=user.id,inventory_id=inv.id,scope_id=data["scope_id"],wine_id=data["wine_id"],sequence=data["sequence"],base_version=data["base_version"],quantity=data["quantity"],device_id=data["device_id"],status="rejected" if code else "applied",error_code=code,applied_at=now() if not code else None)
+    db.session.add(operation)
+    if not code:
+        count=InventoryCount.query.filter_by(inventory_id=inv.id,position_id=scope.position_id,wine_id=wine.id,stage=package.stage).first()
+        if count: count.quantity=data["quantity"]; count.user_id=user.id; count.version+=1; count.counted_at=now(); count.device=data["device_id"]
+        else: db.session.add(InventoryCount(inventory_id=inv.id,position_id=scope.position_id,wine_id=wine.id,stage=package.stage,quantity=data["quantity"],user_id=user.id,device=data["device_id"]))
+        scope.version+=1
+    db.session.add(OfflineAudit(operation_id=data["id"],user_id=user.id,inventory_id=inv.id,scope_id=data["scope_id"],event="rejected" if code else "applied",detail=code))
+    return operation
 
 ROLES=("administrador","contador","conferente")
 def normalize(value): return (value or "").strip()
