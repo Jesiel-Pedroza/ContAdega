@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title description">
+  <title id="title">ContAdega</title>
+  <desc id="description">Garrafa de vinho com marca de conferência</desc>
+  <rect width="512" height="512" rx="112" fill="#591b2c"/>
+  <path fill="#faf7f2" d="M217 104h78v49l-17 30v54c0 17 6 31 18 43 18 19 29 45 29 72v53H187v-53c0-27 11-53 29-72 12-12 18-26 18-43v-54l-17-30z"/>
+  <path fill="#b88a3b" d="M217 104h78v31h-78zm7 171h64c22 20 34 46 34 77v53H190v-53c0-31 12-57 34-77z"/>
+  <path fill="none" stroke="#faf7f2" stroke-linecap="round" stroke-linejoin="round" stroke-width="22" d="m221 341 25 26 52-58"/>
+</svg>
