@@ -1,4 +1,5 @@
 import base64, csv, io
+from pathlib import Path
 from datetime import timedelta
 from uuid import UUID
 from functools import wraps
@@ -7,7 +8,8 @@ from flask import Blueprint, abort, current_app, flash, jsonify, redirect, rende
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from .extensions import db
-from .models import Cellar, ExpectedStock, Inventory, InventoryScope, OfflineOperation, OfflinePackage, Position, Role, Sector, StockHistory, User, Wine, now
+from .models import AuditLog, Cellar, ExpectedStock, Inventory, InventoryScope, OfflineOperation, OfflinePackage, Position, Role, Sector, StockHistory, User, Wine, now
+from .operations import REPORT_TYPES, audit, create_backup, csv_bytes, filtered_report, maintenance_info
 from .services import (CSV_FIELDS, ROLES, acquire_position, adjust_stock, approve_inventory,
  classify_inventory, create_cellar, create_first_admin, create_inventory, create_position,
  create_sector, create_user, create_wine, finish_position, import_wines, parse_csv,
@@ -61,7 +63,7 @@ def login():
             state["count"]+=1
             if state["count"]>=5: state={"count":0,"until":time.time()+60}
             attempts[key]=state; flash("Usuário ou senha inválidos.","erro")
-        else: attempts.pop(key,None); session.clear(); session["user_id"]=user.id; user.last_login=now(); db.session.commit(); return redirect(url_for("main.dashboard"))
+        else: attempts.pop(key,None); session.clear(); session["user_id"]=user.id; user.last_login=now(); audit("login",user); db.session.commit(); return redirect(url_for("main.dashboard"))
     return render_template("login.html")
 @bp.post("/logout")
 @login_required
@@ -111,11 +113,17 @@ def offline_sync():
             op=apply_offline_operation(package,data,user); db.session.flush(); results.append({"id":op.id,"status":op.status,"error":op.error_code,"idempotent":False})
         except IntegrityError:
             db.session.rollback(); return jsonify(error="sequence_conflict",server_time=now().isoformat()+"Z"),409
+    if any(x["status"]!="applied" for x in results): audit("conflito_offline",user,package,{"resultados":results})
     db.session.commit()
     response=jsonify(results=results,server_time=now().isoformat()+"Z"); response.headers["Cache-Control"]="no-store, private"; return response
 @bp.get("/painel")
 @login_required
-def dashboard(): return render_template("dashboard.html",counts={"Vinhos":Wine.query.count(),"Adegas":Cellar.query.count(),"Posições":Position.query.count()})
+def dashboard():
+    active=Inventory.query.filter(Inventory.status.notin_(["rascunho","cancelado","aprovado"])).order_by(Inventory.id.desc()).first()
+    total=len(active.scopes) if active else 0; done=sum(bool(s.first_finished_at) for s in active.scopes) if active else 0
+    last=Inventory.query.filter_by(status="aprovado").order_by(Inventory.approved_at.desc()).first()
+    counts={"Vinhos cadastrados":Wine.query.count(),"Garrafas esperadas":db.session.query(db.func.coalesce(db.func.sum(ExpectedStock.quantity),0)).scalar(),"Inventários em andamento":Inventory.query.filter(Inventory.status.notin_(["rascunho","cancelado","aprovado"])).count(),"Inventário atual":f"{round(done*100/total) if total else 0}%","Posições pendentes":max(total-done,0),"Divergências":sum(r["classification"]!="correto" for r in classify_inventory(active)) if active else 0,"Sincronizações com conflito":OfflineOperation.query.filter_by(status="rejected").count(),"Último inventário aprovado":last.approved_at.strftime("%d/%m/%Y") if last and last.approved_at else "—"}
+    return render_template("dashboard.html",counts=counts,active=active)
 
 RESOURCES={"usuarios":(User,create_user),"vinhos":(Wine,create_wine),"adegas":(Cellar,create_cellar),"setores":(Sector,create_sector),"posicoes":(Position,create_position)}
 @bp.route("/<resource>",methods=["GET","POST"])
@@ -124,7 +132,8 @@ def resource(resource):
     if resource not in RESOURCES: abort(404)
     model,creator=RESOURCES[resource]
     if request.method=="POST":
-        try: creator(request.form); flash("Cadastro salvo com sucesso.","sucesso"); return redirect(url_for("main.resource",resource=resource))
+        try:
+            obj=creator(request.form); audit("cadastro_criado",current_user(),obj,{"recurso":resource}); db.session.commit(); flash("Cadastro salvo com sucesso.","sucesso"); return redirect(url_for("main.resource",resource=resource))
         except (ValueError,IntegrityError,KeyError) as e: db.session.rollback(); flash(str(e) if isinstance(e,ValueError) else "Não foi possível salvar: dado duplicado ou inválido.","erro")
     return render_template("resource.html",resource=resource,items=model.query.order_by(model.id.desc()).all(),cellars=Cellar.query.all(),sectors=Sector.query.all())
 @bp.post("/<resource>/<int:item_id>/excluir")
@@ -141,6 +150,16 @@ def delete_resource(resource,item_id):
 @role_required("administrador")
 def position_qr(item_id):
     item=db.get_or_404(Position,item_id); image=qrcode.make(item.qr_code); output=io.BytesIO(); image.save(output,format="PNG"); encoded=base64.b64encode(output.getvalue()).decode(); return render_template("qr.html",item=item,qr=encoded)
+
+@bp.route("/posicoes/etiquetas",methods=["GET","POST"])
+@role_required("administrador")
+def position_labels():
+    ids=request.values.getlist("positions"); selected=Position.query.filter(Position.id.in_(ids)).order_by(Position.code).all() if ids else []
+    labels=[]
+    for item in selected:
+        image=qrcode.make(item.qr_code); output=io.BytesIO(); image.save(output,format="PNG")
+        labels.append((item,base64.b64encode(output.getvalue()).decode()))
+    return render_template("labels.html",positions=Position.query.filter_by(active=True).order_by(Position.code).all(),labels=labels,size=request.values.get("size","medium"))
 @bp.get("/vinhos/modelo.csv")
 @role_required("administrador")
 def csv_template(): return send_file(io.BytesIO((";".join(CSV_FIELDS)+"\nVinho Exemplo;Produtor;Brasil;Serra Gaúcha;Tinto;Merlot;2020;750;7890000000000;\n").encode()),mimetype="text/csv",as_attachment=True,download_name="modelo-vinhos.csv")
@@ -165,7 +184,8 @@ def csv_import():
 @role_required("administrador")
 def stock():
     if request.method=="POST":
-        try: adjust_stock(db.get_or_404(Position,int(request.form["position_id"])),db.get_or_404(Wine,int(request.form["wine_id"])),request.form["quantity"],current_user(),request.form.get("reason")); flash("Estoque ajustado e histórico registrado.","sucesso"); return redirect(url_for("main.stock"))
+        try:
+            position=db.get_or_404(Position,int(request.form["position_id"])); adjust_stock(position,db.get_or_404(Wine,int(request.form["wine_id"])),request.form["quantity"],current_user(),request.form.get("reason")); audit("estoque_ajustado",current_user(),position); db.session.commit(); flash("Estoque ajustado e histórico registrado.","sucesso"); return redirect(url_for("main.stock"))
         except ValueError as e: db.session.rollback(); flash(str(e),"erro")
     q=request.args.get("q","").strip(); query=ExpectedStock.query.join(Position).join(Wine)
     if q: query=query.filter(or_(Position.code.ilike(f"%{q}%"),Wine.name.ilike(f"%{q}%"),Wine.producer.ilike(f"%{q}%")))
@@ -184,9 +204,27 @@ def stock_import():
     try:
         rows=csv.DictReader(io.StringIO(request.files["file"].read().decode("utf-8-sig")),delimiter=";")
         for row in rows: adjust_stock(db.session.get(Position,int(row["posicao_id"])),db.session.get(Wine,int(row["vinho_id"])),row["quantidade"],current_user(),"Importação CSV",commit=False)
-        db.session.commit(); flash("Estoque importado.","sucesso")
+        audit("estoque_importado",current_user(),detail={"linhas":rows.line_num-1}); db.session.commit(); flash("Estoque importado.","sucesso")
     except Exception: db.session.rollback(); flash("CSV inválido; nenhuma linha foi aplicada.","erro")
     return redirect(url_for("main.stock"))
+
+@bp.get("/relatorios")
+@role_required("administrador")
+def reports():
+    kind=request.args.get("tipo","geral"); kind=kind if kind in REPORT_TYPES else "geral"; rows=filtered_report(kind,request.args)
+    if request.args.get("formato")=="csv":
+        audit("relatorio_exportado",current_user(),detail={"tipo":kind,"linhas":len(rows)}); db.session.commit()
+        return send_file(io.BytesIO(csv_bytes(rows,request.args.get("separador",";") if request.args.get("separador") in {";",","} else ";")),mimetype="text/csv",as_attachment=True,download_name=f"relatorio-{kind}.csv")
+    return render_template("reports.html",types=REPORT_TYPES,kind=kind,rows=rows,inventories=Inventory.query.order_by(Inventory.id.desc()).all())
+
+@bp.route("/administracao/manutencao",methods=["GET","POST"])
+@role_required("administrador")
+def maintenance():
+    if request.method=="POST":
+        try:
+            target=create_backup(); audit("backup_criado",current_user(),detail={"arquivo":target.name}); db.session.commit(); flash(f"Backup verificado criado em {target}.","sucesso")
+        except (ValueError,RuntimeError) as exc: flash(str(exc),"erro")
+    return render_template("maintenance.html",info=maintenance_info())
 
 @bp.route("/inventarios",methods=["GET","POST"])
 @login_required
@@ -194,14 +232,15 @@ def inventories():
     if request.method=="POST":
         if not current_user().has_role("administrador"): abort(403)
         try:
-            cellar=db.get_or_404(Cellar,int(request.form["cellar_id"])); positions=Position.query.filter(Position.id.in_(request.form.getlist("positions"))).all(); create_inventory(request.form.get("name"),cellar,positions,current_user(),request.form.get("notes")); flash("Inventário criado.","sucesso"); return redirect(url_for("main.inventories"))
+            cellar=db.get_or_404(Cellar,int(request.form["cellar_id"])); positions=Position.query.filter(Position.id.in_(request.form.getlist("positions")),Position.cellar_id==cellar.id).all(); inv=create_inventory(request.form.get("name"),cellar,positions,current_user(),request.form.get("notes")); audit("inventario_criado",current_user(),inv); db.session.commit(); flash("Inventário criado.","sucesso"); return redirect(url_for("main.inventories"))
         except ValueError as e: flash(str(e),"erro")
     return render_template("inventories.html",inventories=Inventory.query.order_by(Inventory.id.desc()).all(),cellars=Cellar.query.filter_by(active=True).all(),positions=Position.query.filter_by(active=True).all())
 
 @bp.post("/inventarios/<int:inventory_id>/iniciar")
 @role_required("administrador")
 def inventory_start(inventory_id):
-    try: start_inventory(db.get_or_404(Inventory,inventory_id)); flash("Inventário iniciado; snapshot criado.","sucesso")
+    try:
+        inv=db.get_or_404(Inventory,inventory_id); start_inventory(inv); audit("inventario_aberto",current_user(),inv); db.session.commit(); flash("Inventário iniciado; snapshot criado.","sucesso")
     except ValueError as e: flash(str(e),"erro")
     return redirect(url_for("main.inventory_detail",inventory_id=inventory_id))
 
@@ -210,10 +249,13 @@ def inventory_start(inventory_id):
 def inventory_detail(inventory_id):
     inv=db.get_or_404(Inventory,inventory_id)
     if request.method=="POST":
+        if not current_user().has_role("administrador"): abort(403)
         action=request.form.get("action")
         try:
-            if action=="transition": transition_inventory(inv,request.form["status"]); db.session.commit()
-            elif action=="approve": approve_inventory(inv,current_user(),request.form.get("apply_stock")=="yes",request.form.get("justification"))
+            if action=="transition":
+                transition_inventory(inv,request.form["status"]); audit("inventario_cancelado" if request.form["status"]=="cancelado" else "inventario_etapa_alterada",current_user(),inv,{"status":request.form["status"]}); db.session.commit()
+            elif action=="approve": approve_inventory(inv,current_user(),request.form.get("apply_stock")=="yes",request.form.get("justification")); audit("inventario_aprovado",current_user(),inv,{"estoque_aplicado":request.form.get("apply_stock")=="yes"}); db.session.commit()
+            else: abort(400)
             flash("Operação concluída.","sucesso")
         except (ValueError,PermissionError) as e: db.session.rollback(); flash(str(e),"erro")
         return redirect(url_for("main.inventory_detail",inventory_id=inv.id))
@@ -232,7 +274,7 @@ def inventory_count(inventory_id,scope_id,stage):
     except ValueError as e: flash(str(e),"erro"); return redirect(url_for("main.inventory_detail",inventory_id=inv.id))
     if request.method=="POST":
         try:
-            if request.form.get("finish"): finish_position(inv,scope,current_user(),stage,request.form.get("observation"))
+            if request.form.get("finish"): finish_position(inv,scope,current_user(),stage,request.form.get("observation")); audit("posicao_finalizada" if stage!="recontagem" else "recontagem_finalizada",current_user(),scope,{"etapa":stage}); db.session.commit()
             else: save_count(inv,scope,db.get_or_404(Wine,int(request.form["wine_id"])),request.form["quantity"],current_user(),stage,request.form["version"],request.headers.get("User-Agent"),request.form.get("observation"))
             flash("Contagem registrada.","sucesso"); return redirect(url_for("main.inventory_count",inventory_id=inv.id,scope_id=scope.id,stage=stage))
         except ValueError as e: db.session.rollback(); flash(str(e),"erro")
