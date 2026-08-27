@@ -1,11 +1,15 @@
-import base64, io
+import base64, csv, io
 from functools import wraps
 import qrcode
 from flask import Blueprint, abort, flash, redirect, render_template, request, send_file, session, url_for
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from .extensions import db
-from .models import Cellar, Position, Role, Sector, User, Wine, now
-from .services import CSV_FIELDS, ROLES, create_cellar, create_first_admin, create_position, create_sector, create_user, create_wine, import_wines, parse_csv
+from .models import Cellar, ExpectedStock, Inventory, InventoryScope, Position, Role, Sector, StockHistory, User, Wine, now
+from .services import (CSV_FIELDS, ROLES, acquire_position, adjust_stock, approve_inventory,
+ classify_inventory, create_cellar, create_first_admin, create_inventory, create_position,
+ create_sector, create_user, create_wine, finish_position, import_wines, parse_csv,
+ save_count, start_inventory, transition_inventory)
 
 bp=Blueprint("main",__name__)
 attempts={}
@@ -100,3 +104,84 @@ def csv_import():
                 for error in errors: flash(error,"erro")
                 if preview and not errors: flash("Arquivo válido. Revise e confirme.","sucesso")
     return render_template("import.html",preview=preview)
+
+@bp.route("/estoque",methods=["GET","POST"])
+@role_required("administrador")
+def stock():
+    if request.method=="POST":
+        try: adjust_stock(db.get_or_404(Position,int(request.form["position_id"])),db.get_or_404(Wine,int(request.form["wine_id"])),request.form["quantity"],current_user(),request.form.get("reason")); flash("Estoque ajustado e histórico registrado.","sucesso"); return redirect(url_for("main.stock"))
+        except ValueError as e: db.session.rollback(); flash(str(e),"erro")
+    q=request.args.get("q","").strip(); query=ExpectedStock.query.join(Position).join(Wine)
+    if q: query=query.filter(or_(Position.code.ilike(f"%{q}%"),Wine.name.ilike(f"%{q}%"),Wine.producer.ilike(f"%{q}%")))
+    return render_template("stock.html",stocks=query.order_by(Position.code,Wine.name).all(),positions=Position.query.filter_by(active=True).all(),wines=Wine.query.filter_by(active=True).all(),history=StockHistory.query.order_by(StockHistory.id.desc()).limit(30).all())
+
+@bp.get("/estoque/exportar.csv")
+@role_required("administrador")
+def stock_export():
+    out=io.StringIO(); writer=csv.writer(out,delimiter=";"); writer.writerow(["adega","posicao","vinho_id","vinho","quantidade"])
+    for x in ExpectedStock.query.join(Position).join(Wine).order_by(Position.code).all(): writer.writerow([x.position.sector.cellar.name,x.position.code,x.wine_id,x.wine.name,x.quantity])
+    return send_file(io.BytesIO(out.getvalue().encode("utf-8-sig")),mimetype="text/csv",as_attachment=True,download_name="estoque-atual.csv")
+
+@bp.post("/estoque/importar")
+@role_required("administrador")
+def stock_import():
+    try:
+        rows=csv.DictReader(io.StringIO(request.files["file"].read().decode("utf-8-sig")),delimiter=";")
+        for row in rows: adjust_stock(db.session.get(Position,int(row["posicao_id"])),db.session.get(Wine,int(row["vinho_id"])),row["quantidade"],current_user(),"Importação CSV",commit=False)
+        db.session.commit(); flash("Estoque importado.","sucesso")
+    except Exception: db.session.rollback(); flash("CSV inválido; nenhuma linha foi aplicada.","erro")
+    return redirect(url_for("main.stock"))
+
+@bp.route("/inventarios",methods=["GET","POST"])
+@login_required
+def inventories():
+    if request.method=="POST":
+        if not current_user().has_role("administrador"): abort(403)
+        try:
+            cellar=db.get_or_404(Cellar,int(request.form["cellar_id"])); positions=Position.query.filter(Position.id.in_(request.form.getlist("positions"))).all(); create_inventory(request.form.get("name"),cellar,positions,current_user(),request.form.get("notes")); flash("Inventário criado.","sucesso"); return redirect(url_for("main.inventories"))
+        except ValueError as e: flash(str(e),"erro")
+    return render_template("inventories.html",inventories=Inventory.query.order_by(Inventory.id.desc()).all(),cellars=Cellar.query.filter_by(active=True).all(),positions=Position.query.filter_by(active=True).all())
+
+@bp.post("/inventarios/<int:inventory_id>/iniciar")
+@role_required("administrador")
+def inventory_start(inventory_id):
+    try: start_inventory(db.get_or_404(Inventory,inventory_id)); flash("Inventário iniciado; snapshot criado.","sucesso")
+    except ValueError as e: flash(str(e),"erro")
+    return redirect(url_for("main.inventory_detail",inventory_id=inventory_id))
+
+@bp.route("/inventarios/<int:inventory_id>",methods=["GET","POST"])
+@login_required
+def inventory_detail(inventory_id):
+    inv=db.get_or_404(Inventory,inventory_id)
+    if request.method=="POST":
+        action=request.form.get("action")
+        try:
+            if action=="transition": transition_inventory(inv,request.form["status"]); db.session.commit()
+            elif action=="approve": approve_inventory(inv,current_user(),request.form.get("apply_stock")=="yes",request.form.get("justification"))
+            flash("Operação concluída.","sucesso")
+        except (ValueError,PermissionError) as e: db.session.rollback(); flash(str(e),"erro")
+        return redirect(url_for("main.inventory_detail",inventory_id=inv.id))
+    report=classify_inventory(inv); done=sum(bool(s.first_finished_at) for s in inv.scopes); total=len(inv.scopes)
+    return render_template("inventory.html",inventory=inv,report=report,done=done,total=total,percent=round(done*100/total) if total else 0)
+
+@bp.route("/inventarios/<int:inventory_id>/posicoes/<int:scope_id>/<stage>",methods=["GET","POST"])
+@login_required
+def inventory_count(inventory_id,scope_id,stage):
+    inv=db.get_or_404(Inventory,inventory_id); scope=db.get_or_404(InventoryScope,scope_id)
+    if scope.inventory_id!=inv.id or stage not in {"primeira","segunda","recontagem"}: abort(404)
+    required={"primeira":"contador","segunda":"conferente","recontagem":"conferente"}[stage]
+    if not (current_user().has_role(required) or current_user().has_role("administrador")): abort(403)
+    token=session.setdefault("device_token",__import__("uuid").uuid4().hex)
+    try: acquire_position(scope,current_user(),token)
+    except ValueError as e: flash(str(e),"erro"); return redirect(url_for("main.inventory_detail",inventory_id=inv.id))
+    if request.method=="POST":
+        try:
+            if request.form.get("finish"): finish_position(inv,scope,current_user(),stage,request.form.get("observation"))
+            else: save_count(inv,scope,db.get_or_404(Wine,int(request.form["wine_id"])),request.form["quantity"],current_user(),stage,request.form["version"],request.headers.get("User-Agent"),request.form.get("observation"))
+            flash("Contagem registrada.","sucesso"); return redirect(url_for("main.inventory_count",inventory_id=inv.id,scope_id=scope.id,stage=stage))
+        except ValueError as e: db.session.rollback(); flash(str(e),"erro")
+    visible=[c for c in inv.counts if c.position_id==scope.position_id and c.stage==stage]
+    if stage=="recontagem":
+        divergent={(r["position_id"],r["wine_id"]) for r in classify_inventory(inv) if r["classification"]=="divergencia de conferência"}; wines=Wine.query.filter(Wine.id.in_([w for p,w in divergent if p==scope.position_id])).all()
+    else: wines=Wine.query.filter_by(active=True).order_by(Wine.name).all()
+    return render_template("count.html",inventory=inv,scope=scope,stage=stage,wines=wines,counts=visible)
