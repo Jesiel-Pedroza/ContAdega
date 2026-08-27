@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from uuid import uuid4
-from sqlalchemy import UniqueConstraint, Index
+from sqlalchemy import CheckConstraint, UniqueConstraint
 from werkzeug.security import check_password_hash, generate_password_hash
 from .extensions import db
 
@@ -40,3 +40,31 @@ class Position(db.Model):
     id=db.Column(db.Integer, primary_key=True); sector_id=db.Column(db.Integer, db.ForeignKey("sectors.id", ondelete="CASCADE"), nullable=False); cellar_id=db.Column(db.Integer, db.ForeignKey("cellars.id", ondelete="CASCADE"), nullable=False); code=db.Column(db.String(30, collation="NOCASE"), nullable=False); description=db.Column(db.Text); display_order=db.Column(db.Integer, nullable=False, default=0); capacity=db.Column(db.Integer); active=db.Column(db.Boolean, nullable=False, default=True); qr_code=db.Column(db.String(36), unique=True, nullable=False, default=lambda:str(uuid4()))
     sector=db.relationship(Sector, back_populates="positions")
     __table_args__=(UniqueConstraint("cellar_id","code",name="uq_position_cellar_code"),)
+
+class ExpectedStock(db.Model):
+    __tablename__="expected_stocks"; __table_args__=(UniqueConstraint("position_id","wine_id",name="uq_stock_position_wine"),CheckConstraint("quantity >= 0",name="ck_stock_nonnegative"))
+    id=db.Column(db.Integer,primary_key=True); cellar_id=db.Column(db.Integer,db.ForeignKey("cellars.id"),nullable=False); position_id=db.Column(db.Integer,db.ForeignKey("positions.id"),nullable=False); wine_id=db.Column(db.Integer,db.ForeignKey("wines.id"),nullable=False); quantity=db.Column(db.Integer,nullable=False,default=0); updated_at=db.Column(db.DateTime,nullable=False,default=now,onupdate=now); updated_by_id=db.Column(db.Integer,db.ForeignKey("users.id"),nullable=False)
+    position=db.relationship(Position); wine=db.relationship(Wine); updated_by=db.relationship(User)
+
+class StockHistory(db.Model):
+    __tablename__="stock_history"; __table_args__=(CheckConstraint("quantity_before >= 0 AND quantity_after >= 0",name="ck_history_nonnegative"),)
+    id=db.Column(db.Integer,primary_key=True); stock_id=db.Column(db.Integer,db.ForeignKey("expected_stocks.id")); cellar_id=db.Column(db.Integer,db.ForeignKey("cellars.id"),nullable=False); position_id=db.Column(db.Integer,db.ForeignKey("positions.id"),nullable=False); wine_id=db.Column(db.Integer,db.ForeignKey("wines.id"),nullable=False); quantity_before=db.Column(db.Integer,nullable=False); quantity_after=db.Column(db.Integer,nullable=False); kind=db.Column(db.String(20),nullable=False); reason=db.Column(db.Text,nullable=False); user_id=db.Column(db.Integer,db.ForeignKey("users.id"),nullable=False); created_at=db.Column(db.DateTime,nullable=False,default=now)
+
+class Inventory(db.Model):
+    __tablename__="inventories"
+    id=db.Column(db.Integer,primary_key=True); name=db.Column(db.String(150),nullable=False); cellar_id=db.Column(db.Integer,db.ForeignKey("cellars.id"),nullable=False); status=db.Column(db.String(30),nullable=False,default="rascunho"); created_by_id=db.Column(db.Integer,db.ForeignKey("users.id"),nullable=False); created_at=db.Column(db.DateTime,nullable=False,default=now); started_at=db.Column(db.DateTime); completed_at=db.Column(db.DateTime); approved_at=db.Column(db.DateTime); approved_by_id=db.Column(db.Integer,db.ForeignKey("users.id")); notes=db.Column(db.Text)
+    cellar=db.relationship(Cellar); scopes=db.relationship("InventoryScope",cascade="all, delete-orphan",back_populates="inventory"); counts=db.relationship("InventoryCount",cascade="all, delete-orphan")
+
+class InventoryScope(db.Model):
+    __tablename__="inventory_scopes"; __table_args__=(UniqueConstraint("inventory_id","position_id",name="uq_inventory_position"),)
+    id=db.Column(db.Integer,primary_key=True); inventory_id=db.Column(db.Integer,db.ForeignKey("inventories.id",ondelete="CASCADE"),nullable=False); position_id=db.Column(db.Integer,db.ForeignKey("positions.id"),nullable=False); first_finished_at=db.Column(db.DateTime); second_finished_at=db.Column(db.DateTime); recount_finished_at=db.Column(db.DateTime); first_user_id=db.Column(db.Integer,db.ForeignKey("users.id")); lock_token=db.Column(db.String(64)); lock_user_id=db.Column(db.Integer,db.ForeignKey("users.id")); version=db.Column(db.Integer,nullable=False,default=1)
+    inventory=db.relationship(Inventory,back_populates="scopes"); position=db.relationship(Position); snapshots=db.relationship("InventorySnapshot",cascade="all, delete-orphan")
+
+class InventorySnapshot(db.Model):
+    __tablename__="inventory_snapshots"; __table_args__=(UniqueConstraint("scope_id","wine_id",name="uq_snapshot_wine"),CheckConstraint("quantity >= 0",name="ck_snapshot_nonnegative"))
+    id=db.Column(db.Integer,primary_key=True); scope_id=db.Column(db.Integer,db.ForeignKey("inventory_scopes.id",ondelete="CASCADE"),nullable=False); wine_id=db.Column(db.Integer,db.ForeignKey("wines.id"),nullable=False); quantity=db.Column(db.Integer,nullable=False); wine=db.relationship(Wine)
+
+class InventoryCount(db.Model):
+    __tablename__="inventory_counts"; __table_args__=(UniqueConstraint("inventory_id","position_id","wine_id","stage",name="uq_count_stage"),CheckConstraint("quantity >= 0",name="ck_count_nonnegative"))
+    id=db.Column(db.Integer,primary_key=True); inventory_id=db.Column(db.Integer,db.ForeignKey("inventories.id",ondelete="CASCADE"),nullable=False); position_id=db.Column(db.Integer,db.ForeignKey("positions.id"),nullable=False); wine_id=db.Column(db.Integer,db.ForeignKey("wines.id"),nullable=False); stage=db.Column(db.String(20),nullable=False); quantity=db.Column(db.Integer,nullable=False); user_id=db.Column(db.Integer,db.ForeignKey("users.id"),nullable=False); device=db.Column(db.String(120)); counted_at=db.Column(db.DateTime,nullable=False,default=now); observation=db.Column(db.Text); version=db.Column(db.Integer,nullable=False,default=1)
+    wine=db.relationship(Wine); position=db.relationship(Position); user=db.relationship(User)

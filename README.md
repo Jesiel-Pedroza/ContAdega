@@ -1,6 +1,6 @@
 # ContAdega
 
-Aplicação web independente, mobile-first, para preparar cadastros e a conferência física de vinhos em adegas. Esta primeira etapa inclui autenticação, perfis, cadastros, QR Codes e importação CSV; inventário, PWA/offline e reconhecimento de imagem ficam fora do escopo atual.
+Aplicação web independente, mobile-first, para cadastros, estoque esperado e inventário físico cego de vinhos em adegas. Inclui autenticação por perfis, QR Codes, CSV, duas contagens, recontagem auditável e aprovação transacional. PWA/offline e reconhecimento de imagem continuam fora do escopo.
 
 ## Requisitos
 
@@ -57,6 +57,12 @@ Os testes usam bancos temporários e desabilitam CSRF apenas nas fixtures que ex
 - `contadega/templates` e `contadega/static`: Jinja2, CSS e JavaScript próprios;
 - `migrations`: histórico Alembic desde a primeira versão;
 - `tests`: testes de segurança, cadastros, restrições e CSV.
+
+## Estoque e inventário
+
+Administradores mantêm o estoque esperado em **Estoque**, com consulta por vinho ou posição, importação/exportação CSV e histórico que distingue ajustes administrativos de aplicações de inventário. Em **Inventários**, o administrador define a adega e posições, inicia o snapshot imutável, acompanha o progresso e aprova com ou sem aplicação do físico.
+
+A primeira contagem e a conferência são cegas. Cada posição é bloqueada por sessão, usa versão otimista contra submissões concorrentes e permanece editável somente até sua finalização. Divergências seguem para recontagem com justificativa. Inventários aprovados ou cancelados são imutáveis.
 
 ## SQLite, concorrência e backup
 
