@@ -1,0 +1,1 @@
+{% extends 'base.html' %}{% block content %}<section class="card qr"><h1>Posição {{ item.code }}</h1><p>{{ item.sector.cellar.name }} · Setor {{ item.sector.code }}</p><img src="data:image/png;base64,{{ qr }}" alt="QR Code da posição {{ item.code }}"><p><code>{{ item.qr_code }}</code></p><button type="button" onclick="window.print()">Imprimir</button></section>{% endblock %}

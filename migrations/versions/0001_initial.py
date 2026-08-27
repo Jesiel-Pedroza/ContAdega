@@ -1,0 +1,15 @@
+"""Estrutura inicial do ContAdega."""
+from alembic import op
+import sqlalchemy as sa
+revision="0001"; down_revision=None
+def upgrade():
+ op.create_table("roles",sa.Column("id",sa.Integer(),primary_key=True),sa.Column("name",sa.String(20),nullable=False,unique=True))
+ op.create_table("users",sa.Column("id",sa.Integer(),primary_key=True),sa.Column("name",sa.String(120),nullable=False),sa.Column("username",sa.String(80,collation="NOCASE"),nullable=False,unique=True),sa.Column("password_hash",sa.String(255),nullable=False),sa.Column("active",sa.Boolean(),nullable=False),sa.Column("created_at",sa.DateTime(),nullable=False),sa.Column("last_login",sa.DateTime()))
+ op.create_table("user_roles",sa.Column("user_id",sa.Integer(),sa.ForeignKey("users.id",ondelete="CASCADE"),primary_key=True),sa.Column("role_id",sa.Integer(),sa.ForeignKey("roles.id",ondelete="CASCADE"),primary_key=True))
+ op.create_table("wines",sa.Column("id",sa.Integer(),primary_key=True),sa.Column("name",sa.String(150),nullable=False),sa.Column("producer",sa.String(150),nullable=False),sa.Column("country",sa.String(80),nullable=False),sa.Column("region",sa.String(100)),sa.Column("type",sa.String(60),nullable=False),sa.Column("grape",sa.String(100)),sa.Column("vintage",sa.Integer()),sa.Column("volume_ml",sa.Integer(),nullable=False),sa.Column("barcode",sa.String(64),unique=True),sa.Column("notes",sa.Text()),sa.Column("active",sa.Boolean(),nullable=False),sa.Column("created_at",sa.DateTime(),nullable=False),sa.Column("updated_at",sa.DateTime(),nullable=False))
+ op.create_table("cellars",sa.Column("id",sa.Integer(),primary_key=True),sa.Column("name",sa.String(120),nullable=False,unique=True),sa.Column("description",sa.Text()),sa.Column("active",sa.Boolean(),nullable=False))
+ op.create_table("sectors",sa.Column("id",sa.Integer(),primary_key=True),sa.Column("cellar_id",sa.Integer(),sa.ForeignKey("cellars.id",ondelete="CASCADE"),nullable=False),sa.Column("code",sa.String(20),nullable=False),sa.Column("name",sa.String(100),nullable=False),sa.Column("display_order",sa.Integer(),nullable=False),sa.Column("active",sa.Boolean(),nullable=False),sa.UniqueConstraint("cellar_id","code",name="uq_sector_cellar_code"))
+ op.create_table("positions",sa.Column("id",sa.Integer(),primary_key=True),sa.Column("sector_id",sa.Integer(),sa.ForeignKey("sectors.id",ondelete="CASCADE"),nullable=False),sa.Column("cellar_id",sa.Integer(),sa.ForeignKey("cellars.id",ondelete="CASCADE"),nullable=False),sa.Column("code",sa.String(30,collation="NOCASE"),nullable=False),sa.Column("description",sa.Text()),sa.Column("display_order",sa.Integer(),nullable=False),sa.Column("capacity",sa.Integer()),sa.Column("active",sa.Boolean(),nullable=False),sa.Column("qr_code",sa.String(36),nullable=False,unique=True),sa.UniqueConstraint("cellar_id","code",name="uq_position_cellar_code"))
+ op.bulk_insert(sa.table("roles",sa.column("name",sa.String)),[{"name":"administrador"},{"name":"contador"},{"name":"conferente"}])
+def downgrade():
+ for name in ("positions","sectors","cellars","wines","user_roles","users","roles"): op.drop_table(name)
